@@ -11,7 +11,7 @@
  */
 
 import { Server } from "@modelcontextprotocol/server";
-import type { McpServerFactory, Tool } from "@modelcontextprotocol/server";
+import type { AuthInfo, McpServerFactory, Tool } from "@modelcontextprotocol/server";
 import { getDomainHandler, getAvailableDomains } from "./domains/index.js";
 import {
   isDomainName,
@@ -280,10 +280,29 @@ export function makeMcpServerFactory(options: {
    * `s2sEnforced`.
    */
   allowServerHeldScriptExecution?: string;
+  /**
+   * Fork-only (AUTH_MODE=oauth): the signed-in person's credentials for this
+   * request, from the AuthInfo the HTTP layer verified. Undefined means no
+   * person, so tools report missing credentials and scripts stay closed.
+   */
+  oauthCredentials?: (authInfo: AuthInfo | undefined) => NinjaOneCredentials | undefined;
 }): McpServerFactory {
   const s2sEnforced = options.s2sEnforced === true;
   const allowServerHeldScriptExecution = parseBooleanFlag(options.allowServerHeldScriptExecution);
   return (ctx) => {
+    if (options.oauthCredentials) {
+      const creds = options.oauthCredentials(ctx.authInfo);
+      // The Bearer token is this person's own sign-in, so it is the
+      // per-request caller, exactly like gateway-supplied credentials.
+      return createMcpServer(creds, {
+        scriptCaller: resolveHttpScriptCaller({
+          gatewayMode: true,
+          hasPerRequestCredentials: creds !== undefined,
+          s2sEnforced,
+          allowServerHeldScriptExecution,
+        }),
+      });
+    }
     if (options.gatewayMode) {
       const { creds } = resolveGatewayCredentials(
         (name) => ctx.requestInfo?.headers.get(name) ?? undefined,

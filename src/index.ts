@@ -37,10 +37,11 @@ import {
   type Server as HttpServer,
   type ServerResponse,
 } from "node:http";
-import { createMcpHandler } from "@modelcontextprotocol/server";
+import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import {
+  buildCredentials,
   createMcpServer,
   makeMcpServerFactory,
   resolveGatewayCredentials,
@@ -49,6 +50,7 @@ import {
 import { preflightAuthCheck } from "./utils/client.js";
 import { logger } from "./utils/logger.js";
 import { verifyS2sHeader, S2S_HEADER } from "./s2s-verify.js";
+import { loadOAuthConfig, oauthCredentialsFor, OAuthServer } from "./oauth/server.js";
 
 /**
  * Public example values. A copied placeholder must not verify as a real
@@ -156,9 +158,16 @@ function startStdioTransport(): void {
  * exactly like the previous per-request Server + Transport wiring.
  */
 export async function startHttpTransport(): Promise<HttpServer> {
-  const s2sSecret = resolveHttpS2sSecret();
+  // Fork-only: AUTH_MODE=oauth puts a per-person NinjaOne sign-in in front of
+  // /mcp (src/oauth/server.ts). The Bearer token replaces the gateway's
+  // X-Gateway-S2S signature as the caller check, so no S2S secret is needed.
+  const isOAuthMode = process.env.AUTH_MODE === "oauth";
+  const oauth = isOAuthMode ? new OAuthServer(loadOAuthConfig()) : null;
+  const s2sSecret = isOAuthMode ? "" : resolveHttpS2sSecret();
   const port = parseInt(process.env.MCP_HTTP_PORT || "8080", 10);
-  const host = resolveListenHost(s2sSecret);
+  const host = isOAuthMode
+    ? (process.env.MCP_HTTP_HOST ?? "").trim() || LOOPBACK_HOST
+    : resolveListenHost(s2sSecret);
   const isGatewayMode = process.env.AUTH_MODE === "gateway";
 
   // A scope mismatch (or any other OAuth-level rejection) is otherwise silent
@@ -169,7 +178,7 @@ export async function startHttpTransport(): Promise<HttpServer> {
   // credentials to check at startup, they only arrive per-request via
   // headers (same reasoning as the /health handler below never calling
   // getCredentials()).
-  if (!isGatewayMode) {
+  if (!isGatewayMode && !isOAuthMode) {
     const preflight = await preflightAuthCheck();
     if (preflight.error) {
       // Propagates to main().catch() below, which logs and exits(1) — the
@@ -200,6 +209,7 @@ export async function startHttpTransport(): Promise<HttpServer> {
       // by an elicitation answer.
       s2sEnforced: s2sSecret !== "",
       allowServerHeldScriptExecution: process.env.NINJAONE_ALLOW_SERVER_HELD_SCRIPT_EXECUTION,
+      oauthCredentials: oauth ? oauthCredentialsFor(oauth, buildCredentials) : undefined,
     }),
     {
       legacy: "stateless",
@@ -223,8 +233,27 @@ export async function startHttpTransport(): Promise<HttpServer> {
       return;
     }
 
+    if (oauth && (await oauth.handle(req, res, url))) {
+      return;
+    }
+
     // MCP endpoint
     if (url.pathname === "/mcp") {
+      if (oauth) {
+        const principal = oauth.authenticate(req, res);
+        if (!principal) return;
+        // toNodeHandler forwards req.auth to the factory as ctx.authInfo.
+        (req as IncomingMessage & { auth?: AuthInfo }).auth = {
+          token: "",
+          clientId: principal.clientId,
+          scopes: principal.scopes,
+          expiresAt: principal.expiresAt,
+          extra: { userId: principal.userId },
+        };
+        await handleMcpRequest(req, res);
+        return;
+      }
+
       // Conduit service-to-service auth (gateway#377 parity): rejected
       // BEFORE any credential extraction, mirroring every other ported
       // wrapper (e.g. containers/sentinelone-mcp/gateway_wrapper.py).
@@ -267,7 +296,12 @@ export async function startHttpTransport(): Promise<HttpServer> {
     res.end(JSON.stringify({ error: "Not found", endpoints: ["/mcp", "/health"] }));
   });
 
+  const purge = oauth ? setInterval(() => oauth.store.purgeExpired(), 3600_000) : null;
+  purge?.unref();
+
   httpServer.on("close", () => {
+    if (purge) clearInterval(purge);
+    oauth?.close();
     void mcpHandler.close().catch((error: unknown) => {
       logger.error("Error closing MCP handler", {
         error: error instanceof Error ? error.message : String(error),
@@ -282,7 +316,15 @@ export async function startHttpTransport(): Promise<HttpServer> {
       httpServer.off("error", onError);
       logger.info(`NinjaOne MCP server listening on http://${host}:${port}/mcp`);
       logger.info(`Health check available at http://${host}:${port}/health`);
-      logger.info(`Authentication mode: ${isGatewayMode ? "gateway (header-based)" : "env (environment variables)"}`);
+      logger.info(
+        `Authentication mode: ${
+          isOAuthMode
+            ? "oauth (per-user NinjaOne sign-in)"
+            : isGatewayMode
+              ? "gateway (header-based)"
+              : "env (environment variables)"
+        }`
+      );
       resolve();
     });
   });
