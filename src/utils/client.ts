@@ -51,6 +51,31 @@ export interface NinjaOneCredentials {
    * default -- see types.ts parseBooleanFlag and domains/scripts.ts.
    */
   allowSelfAttestedConfirmation: boolean;
+  /**
+   * Fork-only (AUTH_MODE=oauth): a signed-in person's own NinjaOne token.
+   * When set, the client uses it instead of the client credentials grant;
+   * clientId/clientSecret are then the Web app's and are not sent.
+   */
+  accessToken?: AccessTokenProvider;
+}
+
+/** Supplies a NinjaOne bearer token; `force` asks for a refreshed one after a 401. */
+export type AccessTokenProvider = (force: boolean) => Promise<string>;
+
+/**
+ * Point the SDK's token manager at a per-user token. The SDK only implements
+ * the client credentials grant and exposes no hook, so the two methods its
+ * HTTP layer calls (getToken, and refreshToken after a 401) are replaced on
+ * this one instance.
+ */
+function useAccessToken(client: NinjaOneClient, provider: AccessTokenProvider): NinjaOneClient {
+  const auth = (client as unknown as { authManager?: Record<string, unknown> }).authManager;
+  if (!auth) {
+    throw new Error("NinjaOne SDK has no authManager; per-user tokens are not supported by this SDK version");
+  }
+  auth.getToken = () => provider(false);
+  auth.refreshToken = () => provider(true);
+  return client;
 }
 
 let _client: NinjaOneClient | null = null;
@@ -75,7 +100,7 @@ export function runWithCredentials<T>(creds: NinjaOneCredentials, fn: () => T): 
 export async function createClientDirect(
   creds: NinjaOneCredentials
 ): Promise<NinjaOneClient> {
-  return new NinjaOneClient({
+  const client = new NinjaOneClient({
     clientId: creds.clientId,
     clientSecret: creds.clientSecret,
     baseUrl: creds.baseUrl,
@@ -83,6 +108,7 @@ export async function createClientDirect(
     // send an empty `scope` parameter, which is a different request.
     ...(creds.scopes ? { scopes: creds.scopes } : {}),
   });
+  return creds.accessToken ? useAccessToken(client, creds.accessToken) : client;
 }
 
 /**

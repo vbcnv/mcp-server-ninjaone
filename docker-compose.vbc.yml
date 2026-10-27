@@ -1,0 +1,77 @@
+# Fork-only: NinjaOne MCP behind an existing Traefik on the `proxy` network,
+# with every person signing in with their own NinjaOne account
+# (AUTH_MODE=oauth, see docs/per-user-deployment.md).
+#
+# Deploy:  Portainer stack from this repository, compose path docker-compose.vbc.yml
+# Config:  the stack's environment variables (see .env.example, AUTH_MODE=oauth part)
+services:
+  ninjaone-mcp:
+    build:
+      context: .
+      target: production
+      args:
+        # The NinjaOne SDK is on GitHub Packages: npm needs a token with
+        # read:packages even though the package is public.
+        GITHUB_TOKEN: ${GITHUB_TOKEN:?set GITHUB_TOKEN to a GitHub PAT with read:packages}
+    # A local tag on purpose: naming the upstream image would let a pull
+    # replace this build with upstream's, which has no per-user sign-in.
+    image: ninjaone-mcp:local
+    pull_policy: build
+    container_name: ninjaone-mcp
+    restart: unless-stopped
+
+    # Listed one by one instead of env_file: stack.env also holds GITHUB_TOKEN,
+    # which is only for the build and must not end up in the container.
+    environment:
+      MCP_TRANSPORT: http
+      MCP_HTTP_HOST: 0.0.0.0
+      MCP_HTTP_PORT: 8080
+      AUTH_MODE: oauth
+      MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:?set MCP_PUBLIC_URL, e.g. https://ninjaone.example.com}
+      MCP_SECRET_KEY: ${MCP_SECRET_KEY:?set MCP_SECRET_KEY (openssl rand -hex 32)}
+      NINJAONE_CLIENT_ID: ${NINJAONE_CLIENT_ID:?set NINJAONE_CLIENT_ID of the NinjaOne Web app}
+      NINJAONE_CLIENT_SECRET: ${NINJAONE_CLIENT_SECRET:?set NINJAONE_CLIENT_SECRET of the NinjaOne Web app}
+      NINJAONE_REGION: ${NINJAONE_REGION:-eu}
+      NINJAONE_SCOPES: ${NINJAONE_SCOPES:-monitoring,management}
+      NINJAONE_ALLOWED_SCRIPT_IDS: ${NINJAONE_ALLOWED_SCRIPT_IDS:-}
+      MCP_OAUTH_CLIENT_ID: ${MCP_OAUTH_CLIENT_ID:-}
+      MCP_OAUTH_CLIENT_SECRET: ${MCP_OAUTH_CLIENT_SECRET:-}
+      MCP_OAUTH_CLIENT_REDIRECT_URIS: ${MCP_OAUTH_CLIENT_REDIRECT_URIS:-}
+      MCP_OAUTH_CLIENT_AUTH_METHOD: ${MCP_OAUTH_CLIENT_AUTH_METHOD:-client_secret_post}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Survives rebuilds, so nobody has to sign in again after a deploy.
+      MCP_OAUTH_DB_PATH: /data/oauth.sqlite3
+
+    volumes:
+      - ninjaone-mcp-data:/data
+
+    # No `ports:` on purpose: Traefik reaches the container over `proxy`, and a
+    # published host port would be a second way in that skips TLS.
+
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.services.ninjaone-mcp.loadbalancer.server.port=8080
+      - traefik.http.routers.ninjaone-mcp.rule=Host(`${SUBDOMAIN}.${DOMAIN_NAME}`)
+      - traefik.http.routers.ninjaone-mcp.entrypoints=web,websecure
+      - traefik.http.routers.ninjaone-mcp.tls=true
+      - traefik.http.routers.ninjaone-mcp.tls.certresolver=le
+      - traefik.http.routers.ninjaone-mcp.middlewares=ninjaone-mcp@docker
+      - traefik.http.middlewares.ninjaone-mcp.headers.SSLRedirect=true
+      - traefik.http.middlewares.ninjaone-mcp.headers.STSSeconds=315360000
+      - traefik.http.middlewares.ninjaone-mcp.headers.browserXSSFilter=true
+      - traefik.http.middlewares.ninjaone-mcp.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.ninjaone-mcp.headers.forceSTSHeader=true
+      - traefik.http.middlewares.ninjaone-mcp.headers.SSLHost=${DOMAIN_NAME}
+      - traefik.http.middlewares.ninjaone-mcp.headers.STSIncludeSubdomains=true
+      - traefik.http.middlewares.ninjaone-mcp.headers.STSPreload=true
+
+    networks:
+      - proxy
+
+volumes:
+  ninjaone-mcp-data:
+
+networks:
+  proxy:
+    external: true

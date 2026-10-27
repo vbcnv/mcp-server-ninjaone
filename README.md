@@ -2,6 +2,12 @@
 
 A Model Context Protocol (MCP) server for interacting with NinjaOne, featuring a decision tree architecture for efficient tool loading.
 
+> [!NOTE]
+> **This fork** adds `AUTH_MODE=oauth`: everyone signs in with their own NinjaOne
+> account (from Claude or Microsoft 365 Copilot) and every tool call runs on that
+> person's NinjaOne token. See [docs/per-user-deployment.md](docs/per-user-deployment.md)
+> and `docker-compose.vbc.yml`.
+
 
 ## One-Click Deployment
 

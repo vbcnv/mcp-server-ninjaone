@@ -43,8 +43,8 @@ COPY --from=builder /app/node_modules ./node_modules
 # Prune dev dependencies (avoids re-installing git deps which need build tools)
 RUN npm prune --omit=dev && npm cache clean --force
 
-# Create logs directory
-RUN mkdir -p /app/logs && chown -R ninjaone:ninjaone /app
+# Create logs directory, and /data for the AUTH_MODE=oauth sign-in store
+RUN mkdir -p /app/logs /data && chown -R ninjaone:ninjaone /app /data
 
 # Switch to non-root user
 USER ninjaone
